@@ -11,7 +11,7 @@
   Audiomics Voice Recording — iPad web app (Houston Methodist ENT, R01)
   =====================================================================
 
-  Version: 2.9 (October 2026)
+  Version: 3.2 (October 2026)
   See README.md for setup, iPad settings, file naming, and references.
 
   WHAT THIS PAGE DOES
@@ -27,8 +27,12 @@
   3. Each task is saved as its own WAV file through the iPad share
      sheet ("Save to Files", Box, etc.), plus a "complete" WAV that
      joins all recordings in order with 0.5 s of silence between them.
-  4. The screen is kept awake during a session, and Safari warns
-     before leaving the page while any file is unsaved.
+  4. The screen is kept awake during a session, and desktop browsers
+     warn before leaving the page while any file is unsaved (iPad
+     Safari does not support that prompt).
+  5. Every file and every save attempt is written to a running log on
+     the iPad ("Recording log" link on the first screen), and a
+     per-session log CSV is saved with the audio.
 
   HOW AUDIO IS CAPTURED
   ---------------------
@@ -393,6 +397,16 @@
     .form-group { margin-bottom: 14px; }
   }
 
+  /* Recording log screen */
+  .log-summary { font-size: 15px; color: var(--text-muted); margin-bottom: 12px; line-height: 1.5; }
+  .log-session { padding: 10px 0; border-bottom: 1px solid var(--border); font-size: 14px; line-height: 1.5; }
+  .log-session:last-child { border-bottom: none; }
+  .log-session .ls-head { display: flex; justify-content: space-between; gap: 12px; font-weight: 600; }
+  .log-session .ls-ok { color: var(--primary); font-weight: 600; }
+  .log-session .ls-bad { color: var(--accent); font-weight: 600; }
+  .log-session .ls-files { color: var(--accent); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; margin-top: 2px; }
+  .log-list { max-height: 50vh; overflow-y: auto; }
+
   .spacer { flex: 1; }
   .bottom-action { flex-shrink: 0; padding-top: 16px; }
   .hidden { display: none !important; }
@@ -430,6 +444,27 @@
     <div class="spacer"></div>
     <div class="bottom-action">
       <button class="btn btn-primary" id="btn-continue" onclick="goToConfirm()" disabled>Continue</button>
+      <button class="btn-link" id="btn-open-log" onclick="openLog()">Recording log (staff)</button>
+    </div>
+  </div>
+
+  <!-- ============================================================
+       STAFF: Recording log (running list of every file, all sessions)
+       ============================================================ -->
+  <div class="screen" id="screen-log">
+    <div class="card" style="margin-top:16px">
+      <div class="stage-instruction" style="font-size:24px; margin-bottom:6px">Recording log</div>
+      <p class="log-summary" id="log-summary"></p>
+      <div class="form-group">
+        <label for="device-label">This iPad's label (included in the log)</label>
+        <input type="text" id="device-label" placeholder="e.g. Rhinology iPad 1" maxlength="40" oninput="saveDeviceLabel()" />
+      </div>
+      <div class="log-list" id="log-list"></div>
+    </div>
+    <div class="spacer"></div>
+    <div class="bottom-action">
+      <button class="btn btn-primary" onclick="exportLog()">Export full log (CSV)</button>
+      <button class="btn-link" onclick="showScreen('screen-entry'); refreshLogBadge();">Back</button>
     </div>
   </div>
 
@@ -473,7 +508,7 @@
         <li><span class="task-num">3</span><span>Say <strong>"Eeeee"</strong> for 5 seconds</span></li>
         <li><span class="task-num">4</span><span>Say <strong>"Mmmm"</strong> (as in "mom") for 5 seconds</span></li>
         <li><span class="task-num">5</span><span>Say <strong>"Nnnn"</strong> (as in "never") for 5 seconds</span></li>
-        <li><span class="task-num">6</span><span>Read 6 short sentences aloud, one at a time</span></li>
+        <li><span class="task-num">6</span><span>Read 6 short sentences aloud, one at a time, tapping <strong>Next sentence</strong> after each</span></li>
       </ul>
     </div>
     <div class="spacer"></div>
@@ -505,6 +540,12 @@
 
       <!-- Sentence card: shown for the reading task. Rows are built by
            renderSentences() from TASKS so the text lives in one place. -->
+      <!-- How to move through the sentences; shown before and during reading -->
+      <div class="notice notice-info hidden" id="sentence-hint" style="max-width:560px; margin-bottom:0; text-align:left">
+        Read one sentence at a time, in your normal voice. When you finish a sentence, tap
+        <strong>Next sentence</strong> at the bottom of the screen to move to the next one.
+        After the last sentence, tap <strong>Done reading</strong>.
+      </div>
       <div class="passage-card hidden" id="passage-card"></div>
     </div>
 
@@ -537,6 +578,7 @@
         <strong>Save to Files</strong> or Box in the share sheet.
       </div>
       <button class="btn btn-primary" id="btn-save-all" onclick="saveAll()" style="margin-bottom:12px">Save all</button>
+      <div class="notice notice-info hidden" id="save-all-note"></div>
       <ul class="file-list" id="file-list"></ul>
       <div class="tech-info" id="tech-info"></div>
     </div>
@@ -565,7 +607,7 @@
      CONFIGURATION
      ================================================================= */
 
-  const APP_VERSION = '2.9';
+  const APP_VERSION = '3.2';
 
   // Seconds of lead-in countdown before each task.
   const COUNTDOWN_SECONDS = 3;
@@ -592,7 +634,7 @@
     { id: 'eee',       badge: 'Task 3 of 6', title: 'Say "Eeeee"', sub: 'Hold a steady tone for 5 seconds',                          dur: 5 },
     { id: 'mmm',       badge: 'Task 4 of 6', title: 'Say "Mmmm"',  sub: 'As in "mom" — hold a steady tone for 5 seconds',              dur: 5 },
     { id: 'nnn',       badge: 'Task 5 of 6', title: 'Say "Nnnn"',  sub: 'As in "never" — hold a steady tone for 5 seconds', dur: 5 },
-    { id: 'sentence',  badge: 'Task 6 of 6', title: 'Read aloud',  sub: 'Read the highlighted sentence, then tap Next sentence', dur: null,
+    { id: 'sentence',  badge: 'Task 6 of 6', title: 'Read aloud',  sub: 'Tap Start when you are ready. The first sentence will be highlighted.', dur: null,
       items: [                       // CAPE-V sentences (Kempster et al., 2009)
         'The blue spot is on the key again.',
         'How hard did he hit him?',
@@ -674,6 +716,14 @@
   // Combined file built on the save screen (same shape as a result).
   let completeFile = null;
 
+  // Per-session log CSV, built on the save screen and saved with the audio.
+  let sessionLogFile = null;
+
+  // Session identity for the log.
+  let sessionId = '';           // MRN_date_HHMMSS (local time the session started)
+  let sessionStartedAt = null;  // Date
+  let takeCounts = {};          // recording id -> number of takes (1 = no redo)
+
   // Screen Wake Lock (keeps the iPad from dimming during a session).
   let wakeLock = null;
 
@@ -749,6 +799,10 @@
   function startSession() {
     results = {};
     completeFile = null;
+    sessionLogFile = null;
+    takeCounts = {};
+    sessionStartedAt = new Date();
+    sessionId = `${patientMRN}_${visitDate}_${timeStamp(sessionStartedAt).replace(/:/g, '')}`;
     taskIndex = 0;
     sessionActive = true;
     requestWakeLock(); // called inside the tap, as Safari requires
@@ -787,6 +841,7 @@
     const isSentences = !!t.items;
     $('timer-container').classList.toggle('hidden', isSentences);
     $('passage-card').classList.toggle('hidden', !isSentences);
+    $('sentence-hint').classList.toggle('hidden', !isSentences);
     if (isSentences) {
       sentenceIndex = 0;
       sentenceMode = 'all';
@@ -910,8 +965,9 @@
     const t = TASKS[taskIndex];
     currentRecId = `${t.id}${sentenceIndex + 1}`;
     renderSentences('recording');
-    $('task-sub').textContent = `Sentence ${sentenceIndex + 1} of ${t.items.length}: read it in your normal voice`;
     const last = sentenceMode === 'single' || sentenceIndex === t.items.length - 1;
+    $('task-sub').textContent = `Sentence ${sentenceIndex + 1} of ${t.items.length}: when you finish it, tap ${last ? 'Done reading' : 'Next sentence'}`;
+    $('sentence-hint').classList.remove('hidden');
     $('btn-stop').textContent = last ? 'Done reading' : 'Next sentence';
     startRecording(null);
     setStatus('recording');
@@ -929,7 +985,7 @@
     if (t.items) {
       $('cd-sub').textContent = sentenceMode === 'single'
         ? `Redo sentence ${sentenceIndex + 1}. Read it in your normal voice.`
-        : 'Read each sentence in your normal voice, then tap Next sentence. You will start with:';
+        : 'Read one sentence at a time. After each one, tap Next sentence at the bottom of the screen. You will start with:';
       sentence.textContent = `"${t.items[sentenceIndex]}"`;
       sentence.classList.remove('hidden');
     } else {
@@ -979,6 +1035,7 @@
   function showSentenceReview() {
     $('task-sub').textContent = 'Tap Play to listen. Redo any sentence that needs it, then tap Next.';
     renderSentences('review');
+    $('sentence-hint').classList.add('hidden');
     setStatus('done');
     // Per-sentence Play/Redo live in the rows; the bottom row keeps
     // "Redo all" and "Next".
@@ -1007,6 +1064,7 @@
   // Called by stopRecording(). Stores the take under currentRecId,
   // replacing any earlier take of the same recording.
   function onRecordingFinished() {
+    takeCounts[currentRecId] = (takeCounts[currentRecId] || 0) + 1;
     const samples = flattenChunks(chunks, sampleCount);
     const rate = audioCtx.sampleRate;
     results[currentRecId] = {
@@ -1054,6 +1112,10 @@
     stopRecording(true);
     stopPlayback();
     releaseMic();
+    // Record what was captured before the cancel, so the log shows it.
+    const takes = orderedResults();
+    takes.forEach((r) => { r.log = { status: 'session cancelled', attempts: 0 }; });
+    if (takes.length) logUpsert(takes);
     resetApp();
   }
 
@@ -1244,7 +1306,7 @@
      ================================================================= */
 
   function allItems() {
-    return completeFile ? [...orderedResults(), completeFile] : orderedResults();
+    return [...orderedResults(), completeFile, sessionLogFile].filter(Boolean);
   }
 
   function hasUnsaved() {
@@ -1314,6 +1376,9 @@
   function finishSession() {
     releaseMic();
     completeFile = buildComplete();
+    sessionLogFile = buildSessionLog();
+    allItems().forEach((r) => { r.log = { status: 'not saved', attempts: 0 }; });
+    logUpsert(allItems());
     renderFileList();
     const s = micSettings || {};
     const first = orderedResults()[0];
@@ -1324,18 +1389,22 @@
   }
 
   function renderFileList() {
+    updateSaveAllButton();
     const list = $('file-list');
     list.innerHTML = '';
     allItems().forEach((r) => {
       const li = document.createElement('li');
       const label = document.createElement('span');
-      label.innerHTML = `<span class="file-name">${r.name}</span><br><span style="color:var(--text-muted);font-size:12px">${r.durationSec.toFixed(1)} s</span>`;
+      const detail = r.isLog ? 'session log (CSV)' : `${r.durationSec.toFixed(1)} s`;
+      const note = r.log && r.log.lastResult && !r.saved ? ` · last attempt: ${r.log.lastResult}` : '';
+      label.innerHTML = `<span class="file-name">${r.name}</span><br><span style="color:var(--text-muted);font-size:12px">${detail}${note}</span>`;
       const actions = document.createElement('span');
       actions.className = 'file-actions';
       const play = document.createElement('button');
       play.className = 'btn btn-secondary btn-icon';
       setPlayIcon(play, playingId === r.id);
       play.onclick = () => togglePlayback(r.id, renderFileList);
+      if (r.isLog) play.style.visibility = 'hidden';
       const btn = document.createElement('button');
       btn.className = 'btn ' + (r.saved ? 'btn-secondary' : 'btn-outline');
       btn.textContent = r.saved ? 'Saved' : 'Save';
@@ -1348,31 +1417,100 @@
   }
 
   function toFile(r) {
-    return new File([r.blob], r.name, { type: 'audio/wav' });
+    return new File([r.blob], r.name, { type: r.blob.type || 'application/octet-stream' });
   }
 
   async function saveOne(r) {
-    await shareOrDownload([r]);
-    renderFileList();
+    await saveItems([r]);
   }
 
-  // Shares every per-task file plus the complete file in one sheet.
+  // Largest number of files one share sheet will take. Chrome and Edge
+  // refuse more than 10 files per share with "Permission denied"
+  // (NotAllowedError); Safari publishes no limit. Save all first tries
+  // everything at once; if the browser refuses a large set, the limit
+  // drops to 10 for this device (remembered) and Save all works through
+  // the unsaved files in groups, one tap per group. Each share needs its
+  // own tap, so the groups cannot be sent automatically one after another.
+  const SHARE_GROUP_SIZE = 10;
+  function shareLimit() {
+    try { return Number(localStorage.getItem('audiomics-share-limit')) || Infinity; } catch (e) { return Infinity; }
+  }
+  function setShareLimit(n) {
+    try { localStorage.setItem('audiomics-share-limit', String(n)); } catch (e) { /* not critical */ }
+  }
+
+  // Save all: the unsaved files (or everything again if all are saved),
+  // up to the share limit.
   async function saveAll() {
-    await shareOrDownload(allItems());
-    renderFileList();
+    const unsaved = allItems().filter((r) => !r.saved);
+    const pool = unsaved.length ? unsaved : allItems();
+    const batch = pool.slice(0, shareLimit());
+    const outcome = await saveItems(batch, { quietLimitError: batch.length > SHARE_GROUP_SIZE });
+    if (outcome.result === 'failed' && outcome.errorName === 'NotAllowedError' && batch.length > SHARE_GROUP_SIZE) {
+      setShareLimit(SHARE_GROUP_SIZE);
+      renderFileList();
+      $('save-all-note').textContent =
+        `This browser can only share ${SHARE_GROUP_SIZE} files at a time. Tap the button again to save them in groups.`;
+      $('save-all-note').classList.remove('hidden');
+    }
   }
 
-  async function shareOrDownload(items) {
+  // Label for the Save all button, based on what is left to save.
+  function updateSaveAllButton() {
+    const unsaved = allItems().filter((r) => !r.saved).length;
+    const limit = shareLimit();
+    const btn = $('btn-save-all');
+    if (!unsaved) btn.textContent = 'All saved (tap to save again)';
+    else if (unsaved > limit) btn.textContent = `Save next ${limit} files (${unsaved} unsaved)`;
+    else if (unsaved < allItems().length) btn.textContent = `Save remaining ${unsaved} file${unsaved === 1 ? '' : 's'}`;
+    else btn.textContent = 'Save all';
+    if (!unsaved) $('save-all-note').classList.add('hidden');
+  }
+
+  // Hand files to the share sheet (or download), then record the
+  // outcome of the attempt for every file in the running log.
+  async function saveItems(items, opts = {}) {
+    const { result, error, errorName } = await shareOrDownload(items, opts);
+    const now = new Date();
+    items.forEach((r) => {
+      r.log = r.log || { status: 'not saved', attempts: 0 };
+      r.log.attempts++;
+      r.log.lastAttemptAt = now;
+      r.log.lastResult = result;
+      r.log.lastError = error || '';
+      if (result === 'shared' || result === 'downloaded') {
+        r.saved = true;
+        r.log.status = result === 'shared' ? 'saved (share sheet)' : 'saved (download)';
+        r.log.firstSavedAt = r.log.firstSavedAt || now;
+      }
+    });
+    await logUpsert(items);
+    renderFileList();
+    return { result, errorName };
+  }
+
+  // Returns { result: 'shared' | 'cancelled' | 'failed' | 'downloaded', error }.
+  // 'shared' means the share sheet finished the hand-off (for example
+  // Save to Files completed, or the Box app accepted the files). The page
+  // cannot see whether a later upload inside another app succeeds, so
+  // the log's file names and byte sizes can be compared with Box by hand.
+  // opts.quietLimitError: skip the alert for NotAllowedError, because
+  // saveAll() handles a too-many-files refusal itself.
+  async function shareOrDownload(items, opts = {}) {
     const files = items.map(toFile);
     if (navigator.canShare && navigator.canShare({ files })) {
       try {
         await navigator.share({ files, title: 'Voice recordings' });
-        items.forEach((r) => (r.saved = true));
+        return { result: 'shared' };
       } catch (err) {
-        // AbortError = user dismissed the sheet; not an error worth showing.
-        if (err && err.name !== 'AbortError') alert('Could not open the share sheet: ' + err.message);
+        // AbortError = user dismissed the sheet without choosing a destination.
+        if (err && err.name === 'AbortError') return { result: 'cancelled' };
+        const name = (err && err.name) || 'Error';
+        if (!(opts.quietLimitError && name === 'NotAllowedError')) {
+          alert('Could not open the share sheet: ' + (err && err.message));
+        }
+        return { result: 'failed', errorName: name, error: `${name}: ${(err && err.message) || 'unknown error'}` };
       }
-      return;
     }
 
     // Fallback for browsers without file sharing (desktop testing).
@@ -1390,8 +1528,8 @@
       document.body.removeChild(a);
       // Revoking immediately can abort the download in Safari.
       setTimeout(() => URL.revokeObjectURL(url), 10000);
-      r.saved = true;
     }
+    return { result: 'downloaded' };
   }
 
   // "Record another patient": same loss as leaving the page, so ask
@@ -1410,7 +1548,10 @@
     releaseWakeLock();
     sessionActive = false;
     completeFile = null;
+    sessionLogFile = null;
+    takeCounts = {};
     results = {};
+    $('save-all-note').classList.add('hidden');
     taskIndex = 0;
     patientMRN = '';
     visitDate = '';
@@ -1419,7 +1560,234 @@
     $('visit-date').value = todayLocalISO();
     hideError('entry-error');
     showScreen('screen-entry');
+    refreshLogBadge();
   }
+
+  /* =================================================================
+     RECORDING LOG
+     Two layers, so the log survives if one is lost:
+       1. Running log on the iPad (IndexedDB, database "audiomics-log").
+          One row per file per session, updated after every save
+          attempt. Viewable on the "Recording log" screen and exported
+          as one CSV. Safari may clear site data that goes unused for a
+          while; the page asks for persistent storage, which Safari is
+          more likely to grant when the page is opened from a Home
+          Screen icon. Export the full log regularly.
+       2. Per-session log CSV (MRN_date_log.csv), saved with the audio
+          by "Save all". It lists every file in the session, so the
+          audit can be rebuilt from the Box folder alone.
+     Status values: not saved, saved (share sheet), saved (download),
+     session cancelled. last_attempt_result: shared, cancelled, failed,
+     downloaded.
+     ================================================================= */
+
+  const LOG_DB = 'audiomics-log';
+  const LOG_STORE = 'files';
+  const LOG_COLUMNS = [
+    'session_id', 'session_started', 'mrn', 'visit_date', 'recording_id', 'file_name',
+    'takes', 'duration_s', 'sample_rate', 'bytes',
+    'status', 'save_attempts', 'first_saved_at', 'last_attempt_at', 'last_attempt_result', 'last_error',
+    'app_version', 'device_label', 'device', 'echo_cancellation', 'noise_suppression', 'auto_gain_control',
+  ];
+  // The per-session file is written before anything is saved, so it
+  // leaves out the save-status columns (those live in the running log).
+  const SESSION_LOG_COLUMNS = LOG_COLUMNS.filter((c) =>
+    !['status', 'save_attempts', 'first_saved_at', 'last_attempt_at', 'last_attempt_result', 'last_error'].includes(c));
+
+  let logDbPromise = null;
+  function openLogDb() {
+    if (!logDbPromise) {
+      logDbPromise = new Promise((resolve, reject) => {
+        if (!('indexedDB' in window)) { reject(new Error('IndexedDB not available')); return; }
+        const req = indexedDB.open(LOG_DB, 1);
+        req.onupgradeneeded = () => {
+          const store = req.result.createObjectStore(LOG_STORE, { keyPath: 'key' });
+          store.createIndex('session_id', 'session_id');
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+      logDbPromise.catch(() => { logDbPromise = null; });
+    }
+    return logDbPromise;
+  }
+
+  // Local time as HH:MM:SS and YYYY-MM-DD HH:MM:SS (log times are
+  // local clinic time, not UTC, to match the visit date).
+  function timeStamp(d) {
+    const p = (n) => String(n).padStart(2, '0');
+    return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  }
+  function localDateTime(d) {
+    if (!d) return '';
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${timeStamp(d)}`;
+  }
+
+  function getDeviceLabel() {
+    try { return localStorage.getItem('audiomics-device-label') || ''; } catch (e) { return ''; }
+  }
+  function saveDeviceLabel() {
+    try { localStorage.setItem('audiomics-device-label', $('device-label').value.trim()); } catch (e) { /* not critical */ }
+  }
+
+  // iPadOS Safari reports a Mac user agent by default; maxTouchPoints
+  // tells the two apart.
+  function deviceString() {
+    return `${navigator.userAgent} | touchPoints=${navigator.maxTouchPoints || 0}`;
+  }
+
+  // One log row for a file in the current session.
+  function logRow(r) {
+    const s = micSettings || {};
+    const l = r.log || {};
+    return {
+      key: `${sessionId}/${r.id}`,
+      session_id: sessionId,
+      session_started: localDateTime(sessionStartedAt),
+      mrn: patientMRN,
+      visit_date: visitDate,
+      recording_id: r.id,
+      file_name: r.name,
+      takes: r.isLog || r.id === 'complete' ? '' : (takeCounts[r.id] || 1),
+      duration_s: r.isLog ? '' : r.durationSec.toFixed(3),
+      sample_rate: r.isLog ? '' : r.sampleRate,
+      bytes: r.blob.size,
+      status: l.status || 'not saved',
+      save_attempts: l.attempts || 0,
+      first_saved_at: localDateTime(l.firstSavedAt),
+      last_attempt_at: localDateTime(l.lastAttemptAt),
+      last_attempt_result: l.lastResult || '',
+      last_error: l.lastError || '',
+      app_version: APP_VERSION,
+      device_label: getDeviceLabel(),
+      device: deviceString(),
+      echo_cancellation: s.echoCancellation,
+      noise_suppression: s.noiseSuppression,
+      auto_gain_control: s.autoGainControl,
+    };
+  }
+
+  // Write (insert or replace) rows for these files. Never throws: a
+  // logging failure must not block saving recordings.
+  async function logUpsert(items) {
+    try {
+      const db = await openLogDb();
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(LOG_STORE, 'readwrite');
+        const store = tx.objectStore(LOG_STORE);
+        items.forEach((r) => store.put(logRow(r)));
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch (err) {
+      console.warn('Recording log not updated:', err);
+    }
+  }
+
+  async function logAll() {
+    const db = await openLogDb();
+    return new Promise((resolve, reject) => {
+      const req = db.transaction(LOG_STORE, 'readonly').objectStore(LOG_STORE).getAll();
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  // CSV with quoting (RFC 4180 style): fields with commas, quotes, or
+  // line breaks are wrapped in quotes and inner quotes are doubled.
+  function toCsv(rows, columns) {
+    const esc = (v) => {
+      const t = v === undefined || v === null ? '' : String(v);
+      return /[",\r\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
+    };
+    return [columns.join(','), ...rows.map((r) => columns.map((c) => esc(r[c])).join(','))].join('\r\n') + '\r\n';
+  }
+
+  // Per-session log file, saved alongside the audio.
+  function buildSessionLog() {
+    const rows = [...orderedResults(), completeFile].filter(Boolean).map(logRow);
+    const blob = new Blob([toCsv(rows, SESSION_LOG_COLUMNS)], { type: 'text/csv' });
+    return { id: 'log', isLog: true, name: `${patientMRN}_${visitDate}_log.csv`, blob, saved: false };
+  }
+
+  // Entry-screen link shows how many logged files were never saved.
+  async function refreshLogBadge() {
+    try {
+      const rows = await logAll();
+      const n = rows.filter((r) => r.status === 'not saved').length;
+      $('btn-open-log').textContent = n
+        ? `Recording log (staff) — ${n} file(s) never saved`
+        : 'Recording log (staff)';
+    } catch (err) { /* log unavailable; leave the plain link */ }
+  }
+
+  async function openLog() {
+    $('device-label').value = getDeviceLabel();
+    showScreen('screen-log');
+    const list = $('log-list');
+    list.innerHTML = '';
+    let rows;
+    try {
+      rows = await logAll();
+    } catch (err) {
+      $('log-summary').textContent = 'The log could not be opened on this device (' + err.message + ').';
+      return;
+    }
+    // Group rows by session, newest first.
+    const sessions = {};
+    rows.forEach((r) => { (sessions[r.session_id] = sessions[r.session_id] || []).push(r); });
+    const ids = Object.keys(sessions).sort((a, b) =>
+      sessions[b][0].session_started.localeCompare(sessions[a][0].session_started));
+    const unsaved = rows.filter((r) => r.status === 'not saved').length;
+    $('log-summary').textContent =
+      `${ids.length} session(s), ${rows.length} file(s) logged on this iPad. ` +
+      `${unsaved} file(s) never saved. Export the full log regularly; Safari can clear stored data.`;
+
+    ids.forEach((id) => {
+      const rs = sessions[id];
+      const saved = rs.filter((r) => r.status.startsWith('saved')).length;
+      const cancelled = rs.some((r) => r.status === 'session cancelled');
+      const bad = rs.filter((r) => !r.status.startsWith('saved'));
+      const div = document.createElement('div');
+      div.className = 'log-session';
+      const head = document.createElement('div');
+      head.className = 'ls-head';
+      const left = document.createElement('span');
+      left.textContent = `${rs[0].session_started} · MRN ${rs[0].mrn}`;
+      const right = document.createElement('span');
+      right.className = bad.length ? 'ls-bad' : 'ls-ok';
+      right.textContent = cancelled ? 'Session cancelled' : `${saved} of ${rs.length} saved`;
+      head.append(left, right);
+      div.appendChild(head);
+      if (bad.length && !cancelled) {
+        const files = document.createElement('div');
+        files.className = 'ls-files';
+        files.textContent = 'Not saved: ' + bad.map((r) => r.recording_id + (r.last_attempt_result ? ` (${r.last_attempt_result})` : '')).join(', ');
+        div.appendChild(files);
+      }
+      list.appendChild(div);
+    });
+  }
+
+  async function exportLog() {
+    let rows;
+    try { rows = await logAll(); } catch (err) { alert('The log could not be opened: ' + err.message); return; }
+    rows.sort((a, b) => a.session_started.localeCompare(b.session_started) || a.key.localeCompare(b.key));
+    const now = new Date();
+    const stamp = `${todayLocalISO()}_${timeStamp(now).replace(/:/g, '').slice(0, 4)}`;
+    const item = {
+      name: `audiomics_recording_log_${stamp}.csv`,
+      blob: new Blob([toCsv(rows, LOG_COLUMNS)], { type: 'text/csv' }),
+    };
+    await shareOrDownload([item]);
+  }
+
+  // Ask Safari to keep the log (and cached page) instead of clearing it.
+  if (navigator.storage && navigator.storage.persist) {
+    navigator.storage.persist().catch(() => {});
+  }
+  refreshLogBadge();
 
   /* =================================================================
      OFFLINE SUPPORT
