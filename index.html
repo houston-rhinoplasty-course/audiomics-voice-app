@@ -6,6 +6,14 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>Audiomics Voice Recording</title>
 
+<!--
+  =====================================================================
+  Audiomics Voice Recording — iPad web app (Houston Methodist ENT, R01)
+  =====================================================================
+
+  Version: 4.5 (October 2026)
+  See README.md for setup, iPad settings, file naming, and references.
+
   WHAT THIS PAGE DOES
   -------------------
   1. Staff enter the patient's MRN and visit date, then confirm them.
@@ -14,8 +22,10 @@
        the app's flow), aaa, eee, mmm, nnn (5 s each), and six CAPE-V
        sentences (each its own recording, advanced with "Next
        sentence").
-     Each task is started by a tap. Afterwards each take can be played
-     back, then redone or accepted with Next.
+     Every task opens with the blue instruction screen and a 5 s
+     countdown. "I'm Ready" goes straight into task 1, and Next goes
+     straight into tasks 2-5; only the sentences use a Start tap. Each take can be played back, then redone or
+     accepted with Next.
   3. Each task is saved as its own WAV file through the iPad share
      sheet ("Save to Files", Box, etc.), plus a "complete" WAV that
      joins all recordings in order with 0.5 s of silence between them.
@@ -191,13 +201,23 @@
     color: var(--text-muted); margin-bottom: 8px;
   }
   .form-group input {
-    width: 100%; padding: 14px 16px; font-size: 18px;
+    width: 100%; height: 56px; padding: 0 16px; font-size: 18px;
     font-family: var(--font); font-weight: 500;
     border: 2px solid var(--border); border-radius: 12px;
     background: var(--bg); color: var(--text); outline: none;
     transition: border-color 0.2s;
   }
   .form-group input:focus { border-color: var(--primary); }
+  /* iPad Safari draws date fields with its own control, which ignores
+     width: 100% and runs past the card. Turn the native styling off so
+     the field matches the MRN box above it: same width, height, and
+     left-aligned text. Tapping it still opens the iPad date picker. */
+  .form-group input[type="date"] {
+    -webkit-appearance: none; appearance: none;
+    display: block; min-width: 0; max-width: 100%;
+    height: 56px; line-height: normal; text-align: left;
+  }
+  .form-group input[type="date"]::-webkit-date-and-time-value { text-align: left; margin: 0; }
   .form-group input::placeholder { color: var(--accent-blue); }
 
   /* Confirmation table */
@@ -421,7 +441,7 @@
   }
 
   /* Device identity line (entry and log screens) */
-  .device-line { font-size: 13px; color: var(--text-muted); margin-top: 12px; }
+  .device-line { font-size: 13px; color: var(--text-muted); margin-top: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .device-line.warn { color: var(--accent); font-weight: 600; }
 
   /* Recording log screen */
@@ -657,10 +677,10 @@
      CONFIGURATION
      ================================================================= */
 
-  const APP_VERSION = '4.1';
+  const APP_VERSION = '4.5';
 
   // Seconds of lead-in countdown before each task.
-  const COUNTDOWN_SECONDS = 3;
+  const COUNTDOWN_SECONDS = 5;   // time to read the instructions before recording starts
 
   // Seconds of digital silence placed between tasks in the combined
   // "complete" file, so the task boundaries are easy to see and hear.
@@ -687,7 +707,7 @@
     { id: 'mmm',       badge: 'Task 4 of 6', title: 'Say "Mmmm"',  sub: 'Hold a steady tone for 5 seconds.',                         dur: 5 },
     { id: 'nnn',       badge: 'Task 5 of 6', title: 'Say "Nnnn"',  sub: 'Hold a steady tone for 5 seconds.',                         dur: 5 },
     { id: 'sentence',  badge: 'Task 6 of 6', title: 'Read aloud',  sub: 'Tap Start when you are ready.', dur: null,
-      countdownSec: 5,               // longer: time to read the first sentence and the Next sentence instruction
+      countdownSec: 5,               // time to read the first sentence and the Next sentence instruction
       items: [                       // CAPE-V sentences (Kempster et al., 2009)
         'The blue spot is on the key again.',
         'How hard did he hit him?',
@@ -869,10 +889,14 @@
     showScreen('screen-welcome');
   }
 
+  // "I'm Ready": go straight into task 1 (room noise) with its blue
+  // instruction screen; no separate Start tap. This tap also opens the
+  // microphone, so Safari's permission prompt appears here.
   function beginTasks() {
     taskIndex = 0;
     renderTask();
     showScreen('screen-task');
+    startTask();
   }
 
   // Ordered list of finished recordings (skips any not recorded yet).
@@ -995,8 +1019,11 @@
     $('timer-text').textContent = Math.max(0, Math.ceil(totalSec - elapsedSec));
   }
 
-  // Start tap. Opens the mic first (inside the tap, which iOS needs
-  // for AudioContext), then runs the countdown unless the task opts out.
+  // Start a task: blue instruction screen with the countdown, then
+  // record. Called from "I'm Ready" (room noise), from Next or Redo
+  // (room noise, ahh, eee, mmm, nnn), and from the Start tap on the
+  // sentence task. Opens the mic first, inside the
+  // tap, which iOS needs for AudioContext.
   async function startTask() {
     hideError('task-error');
     stopPlayback();
@@ -1185,13 +1212,17 @@
     if (t.items) t.items.forEach((_, i) => delete results[`${t.id}${i + 1}`]);
     else delete results[t.id];
     renderTask();
+    if (!t.items) startTask(); // timed task: instruction screen, then record again
   }
 
+  // Next: timed tasks (ahh, eee, mmm, nnn) go straight to their blue
+  // instruction screen and record; the sentence task waits for Start.
   function nextTask() {
     stopPlayback();
     if (taskIndex < TASKS.length - 1) {
       taskIndex++;
       renderTask();
+      if (!TASKS[taskIndex].items) startTask();
     } else {
       finishSession();
     }
@@ -1619,7 +1650,9 @@
     const files = items.map(toFile);
     if (navigator.canShare && navigator.canShare({ files })) {
       try {
-        await navigator.share({ files, title: 'Voice recordings' });
+        // Files only. Passing a title or text as well can make "Save to
+        // Files" on iPad write that text into an extra .txt file.
+        await navigator.share({ files });
         return { result: 'shared' };
       } catch (err) {
         // AbortError = user dismissed the sheet without choosing a destination.
@@ -1793,12 +1826,16 @@
     const label = getDeviceLabel();
     const id = shortDeviceId(getDeviceId());
     const d = deviceDescription();
-    const text = `This device: ${label || 'not labelled'} · ID ${id} · ${d.type}, ${d.browser} · app v${APP_VERSION}`;
-    for (const elId of ['device-line', 'device-id-line']) {
-      const el = $(elId);
-      if (!el) continue;
-      el.textContent = label ? text : text + ' — set a label in Recording log (staff).';
-      el.classList.toggle('warn', !label);
+    // First screen: short, one line. Log screen: full details.
+    const entry = $('device-line');
+    entry.textContent = label
+      ? `${label} · ID ${id} · v${APP_VERSION}`
+      : `iPad not labelled (ID ${id}) · set a label in Recording log`;
+    entry.classList.toggle('warn', !label);
+    const full = $('device-id-line');
+    if (full) {
+      full.textContent = `Device ID ${id} · ${d.type}, ${d.browser} · app v${APP_VERSION}`;
+      full.classList.remove('warn');
     }
   }
 
