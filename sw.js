@@ -13,7 +13,7 @@
   activation.
 */
 
-const CACHE_NAME = 'audiomics-recorder-v4.1';
+const CACHE_NAME = 'audiomics-recorder-v4.6';
 const PAGE = './audiomics-recorder.html';
 
 self.addEventListener('install', (event) => {

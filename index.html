@@ -11,7 +11,7 @@
   Audiomics Voice Recording — iPad web app (Houston Methodist ENT, R01)
   =====================================================================
 
-  Version: 4.5 (October 2026)
+  Version: 4.6 (October 2026)
   See README.md for setup, iPad settings, file naming, and references.
 
   WHAT THIS PAGE DOES
@@ -330,6 +330,7 @@
   .sentence.dim .s-text { color: #B4B4B4; }
   .sentence.dim .s-num { background: var(--bg); color: #B4B4B4; }
   .sentence.current .s-num { background: var(--accent); color: #fff; }
+  .s-flag { color: var(--accent); font-size: 14px; font-weight: 600; white-space: nowrap; }
 
   /* Countdown (3-2-1 before each task): full-screen Methodist Blue
      overlay that also shows the upcoming task, so the patient knows
@@ -677,7 +678,7 @@
      CONFIGURATION
      ================================================================= */
 
-  const APP_VERSION = '4.5';
+  const APP_VERSION = '4.6';
 
   // Seconds of lead-in countdown before each task.
   const COUNTDOWN_SECONDS = 5;   // time to read the instructions before recording starts
@@ -776,6 +777,9 @@
   // Which recording the microphone is currently filling.
   let currentRecId = null;
 
+  // Takes whose capture-rate check failed (need a redo).
+  const flaggedTakes = new Set();
+
   // Sentence task state.
   let sentenceIndex = 0;        // 0-based index of the highlighted sentence
   let sentenceMode = 'all';     // 'all' = reading 1..6 in a row; 'single' = redoing one
@@ -789,9 +793,14 @@
   }
 
   // Playback of a finished take (one shared <audio> element).
-  const player = new Audio();
-  let playerUrl = null;
+  // Playback goes through Web Audio (see PLAYBACK), not an <audio> element.
+  let playSource = null;        // AudioBufferSourceNode currently playing
+  let playbackCtx = null;       // used only when the mic is closed (save screen)
   let playingId = null;
+
+  // Capture-rate check for the take in progress (see stopRecording).
+  let rateT0 = 0;               // performance.now() at the first audio block
+  let rateN0 = 0;               // samples captured up to that block
 
   // Combined file built on the save screen (same shape as a result).
   let completeFile = null;
@@ -878,6 +887,7 @@
 
   function startSession() {
     results = {};
+    flaggedTakes.clear();
     completeFile = null;
     sessionLogFile = null;
     takeCounts = {};
@@ -973,8 +983,9 @@
         play.disabled = !results[id];
         play.onclick = () => togglePlayback(id, () => renderSentences('review'));
         const redo = document.createElement('button');
-        redo.className = 'btn btn-secondary';
+        redo.className = flaggedTakes.has(id) ? 'btn btn-accent' : 'btn btn-secondary';
         redo.textContent = 'Redo';
+        if (flaggedTakes.has(id)) txt.insertAdjacentHTML('beforeend', ' <span class="s-flag">Please redo</span>');
         redo.onclick = () => redoSentence(i);
         actions.append(play, redo);
         row.append(actions);
@@ -1148,7 +1159,10 @@
   window.addEventListener('resize', lockHintHeight); // e.g. iPad rotated
 
   function showSentenceReview() {
-    $('task-sub').textContent = 'Sentence review';
+    const t = TASKS[taskIndex];
+    const anyBad = t.items.some((_, i) => flaggedTakes.has(`${t.id}${i + 1}`));
+    if (anyBad) releaseMic(); // reopened fresh on the next Redo tap
+    $('task-sub').textContent = anyBad ? 'Some sentences need to be recorded again.' : 'Sentence review';
     renderSentences('review');
     // Same box as before, new text: removing it would shift the list up.
     $('sentence-hint').innerHTML = SENTENCE_HINT_REVIEW;
@@ -1193,12 +1207,28 @@
       sampleRate: rate,
       recordedAt: new Date(),
       levels: levelStats(samples),
+      captureRate: lastCaptureRate,
+      captureCheck: captureCheck(lastCaptureRate, rate),
     };
+
+    // If the take came in at the wrong rate, close the mic so the
+    // next take (Redo) reopens it fresh at the current hardware rate,
+    // and ask for a redo.
+    const bad = results[currentRecId].captureCheck === 'MISMATCH';
+    if (bad) {
+      console.warn(`Capture rate ${Math.round(lastCaptureRate)} Hz vs ${rate} Hz for ${currentRecId}`);
+      flaggedTakes.add(currentRecId);
+    } else {
+      flaggedTakes.delete(currentRecId);
+    }
 
     // Timed tasks go straight to review; the sentence task decides in stopTask().
     if (!TASKS[taskIndex].items) {
+      if (bad) releaseMic(); // reopened fresh on the Redo tap
       setStatus('done');
-      $('task-sub').textContent = 'Tap ▶ to listen, then Next or Redo.';
+      $('task-sub').textContent = bad
+        ? 'This recording did not save correctly. Please tap Redo.'
+        : 'Tap ▶ to listen, then Next or Redo.';
       $('btn-play').classList.remove('hidden');
       setPlayIcon($('btn-play'), false);
       $('btn-redo').textContent = 'Redo';
@@ -1209,8 +1239,8 @@
   // Bottom "Redo" (timed tasks) or "Redo all" (sentences).
   function redoTask() {
     const t = TASKS[taskIndex];
-    if (t.items) t.items.forEach((_, i) => delete results[`${t.id}${i + 1}`]);
-    else delete results[t.id];
+    if (t.items) t.items.forEach((_, i) => { delete results[`${t.id}${i + 1}`]; flaggedTakes.delete(`${t.id}${i + 1}`); });
+    else { delete results[t.id]; flaggedTakes.delete(t.id); }
     renderTask();
     if (!t.items) startTask(); // timed task: instruction screen, then record again
   }
@@ -1244,29 +1274,60 @@
 
   /* =================================================================
      PLAYBACK
-     One shared <audio> element plays a finished take from its WAV
-     blob. On iPad it plays through the speaker. Playback is stopped
-     whenever a new recording starts or the screen changes.
+     Takes are played through Web Audio: the recorder's own
+     AudioContext while the mic is open, or a separate one on the save
+     screen. Earlier versions used an <audio> element. On iPad, starting
+     <audio> playback while the mic is open can make iOS change the
+     audio hardware settings (including sample rate), and a take
+     recorded after that could be captured at a different rate from
+     the one written in the file, so it played back sped up. Playing
+     through the same AudioContext avoids that switch. The buffer is
+     created at the take's own sample rate, so it plays at the right
+     speed whatever rate the context runs at.
      ================================================================= */
+
+  function getPlaybackCtx() {
+    if (audioCtx) return audioCtx;
+    if (!playbackCtx) playbackCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (playbackCtx.state === 'suspended') playbackCtx.resume().catch(() => {});
+    return playbackCtx;
+  }
 
   function togglePlayback(id, onChange) {
     if (playingId === id) { stopPlayback(); onChange && onChange(); return; }
     stopPlayback();
     const r = results[id] || (completeFile && completeFile.id === id ? completeFile : null);
-    if (!r) return;
-    playerUrl = URL.createObjectURL(r.blob);
-    player.src = playerUrl;
-    playingId = id;
-    player.onended = () => { stopPlayback(); onChange && onChange(); };
-    player.play().catch(() => { stopPlayback(); onChange && onChange(); });
+    if (!r || !r.samples || !r.samples.length) return;
+    try {
+      const ctx = getPlaybackCtx();
+      if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+      const buf = ctx.createBuffer(1, r.samples.length, r.sampleRate);
+      buf.getChannelData(0).set(r.samples);
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(ctx.destination);
+      src.onended = () => {
+        if (playSource !== src) return;
+        stopPlayback();
+        onChange && onChange();
+      };
+      src.start();
+      playSource = src;
+      playingId = id;
+    } catch (err) {
+      console.warn('Playback failed:', err);
+      stopPlayback();
+    }
     onChange && onChange();
   }
 
   function stopPlayback() {
-    player.pause();
-    player.onended = null;
-    if (playerUrl) { URL.revokeObjectURL(playerUrl); playerUrl = null; }
-    player.removeAttribute('src');
+    if (playSource) {
+      playSource.onended = null;
+      try { playSource.stop(); } catch (e) { /* already stopped */ }
+      try { playSource.disconnect(); } catch (e) { /* not connected */ }
+      playSource = null;
+    }
     playingId = null;
   }
 
@@ -1307,6 +1368,7 @@
       const input = e.inputBuffer.getChannelData(0);
       chunks.push(new Float32Array(input)); // copy; the buffer is reused
       sampleCount += input.length;
+      if (!rateT0) { rateT0 = performance.now(); rateN0 = sampleCount; } // clock starts at the first block
       if (sampleLimit && sampleCount >= sampleLimit) stopRecording();
     };
 
@@ -1328,6 +1390,8 @@
   function startRecording(durSec) {
     chunks = [];
     sampleCount = 0;
+    rateT0 = 0;
+    rateN0 = 0;
     sampleLimit = durSec ? Math.round(durSec * audioCtx.sampleRate) : 0;
     recording = true;
 
@@ -1345,6 +1409,7 @@
     if (!recording) return;
     recording = false;
     if (rafId) cancelAnimationFrame(rafId);
+    lastCaptureRate = measuredCaptureRate();
 
     if (sampleLimit) {
       // Trim to exactly the requested length and fill the ring.
@@ -1354,6 +1419,26 @@
       $('timer-container').classList.add('complete');
     }
     if (!discard) onRecordingFinished();
+  }
+
+  // Capture-rate check. Samples received per second of clock time,
+  // measured from the first audio block to the stop. It should match
+  // the AudioContext sample rate (the rate written in the WAV file).
+  // A large mismatch means the audio hardware changed rate mid-session
+  // and the take would play back too fast or too slow. Needs about a
+  // second of audio to be meaningful (blocks arrive about every 85 ms).
+  const RATE_CHECK_MIN_SEC = 1;
+  const RATE_CHECK_TOLERANCE = 0.10;   // flag if off by more than 10%
+  let lastCaptureRate = null;
+  function measuredCaptureRate() {
+    if (!rateT0) return null;
+    const sec = (performance.now() - rateT0) / 1000;
+    if (sec < RATE_CHECK_MIN_SEC) return null;
+    return (sampleCount - rateN0) / sec;
+  }
+  function captureCheck(measured, rate) {
+    if (measured === null || measured === undefined) return 'too short to check';
+    return Math.abs(measured / rate - 1) > RATE_CHECK_TOLERANCE ? 'MISMATCH' : 'ok';
   }
 
   // Join the processor's Float32Array blocks into one array of exactly
@@ -1376,26 +1461,50 @@
   function buildComplete() {
     const takes = orderedResults();
     if (!takes.length) return null;
-    const rate = takes[0].sampleRate;
-    if (takes.some((r) => r.sampleRate !== rate)) return null; // should not happen within one session
+    // Normally every take shares one rate. If the mic was reopened
+    // after a capture-rate problem, the hardware rate may differ between
+    // takes; then the complete file uses the most common rate and the
+    // other takes are resampled for it by linear interpolation. The
+    // per-task files are never resampled.
+    const counts = {};
+    takes.forEach((r) => { counts[r.sampleRate] = (counts[r.sampleRate] || 0) + 1; });
+    const rate = Number(Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0]);
 
     const gap = new Float32Array(Math.round(COMPLETE_GAP_SEC * rate));
     const parts = [];
     takes.forEach((r, i) => {
       if (i > 0 && gap.length) parts.push(gap);
-      parts.push(r.samples);
+      parts.push(r.sampleRate === rate ? r.samples : resampleLinear(r.samples, r.sampleRate, rate));
     });
     const total = parts.reduce((n, a) => n + a.length, 0);
+    const samples = new Float32Array(total);
+    let off = 0;
+    parts.forEach((a) => { samples.set(a, off); off += a.length; });
     return {
       id: 'complete',
       name: `${patientMRN}_${visitDate}_complete.wav`,
-      blob: encodeWav(parts, total, rate),
+      blob: encodeWav([samples], total, rate),
+      samples,
       saved: false,
       durationSec: total / rate,
       sampleRate: rate,
       recordedAt: new Date(),
-      levels: levelStats(new Float32Array(0), parts),
+      levels: levelStats(samples),
+      resampled: takes.some((r) => r.sampleRate !== rate),
     };
+  }
+
+  // Linear-interpolation resampling (complete file only, and only when
+  // takes differ in rate).
+  function resampleLinear(input, fromRate, toRate) {
+    const n = Math.round(input.length * toRate / fromRate);
+    const out = new Float32Array(n);
+    const step = fromRate / toRate;
+    for (let i = 0; i < n; i++) {
+      const x = i * step, i0 = Math.floor(x), i1 = Math.min(i0 + 1, input.length - 1), f = x - i0;
+      out[i] = input[i0] * (1 - f) + input[i1] * f;
+    }
+    return out;
   }
 
   // Peak and RMS level in dBFS (0 dBFS = full scale) and the number of
@@ -1696,6 +1805,8 @@
 
   function resetApp() {
     stopPlayback();
+    if (playbackCtx) { playbackCtx.close().catch(() => {}); playbackCtx = null; }
+    flaggedTakes.clear();
     releaseMic();
     releaseWakeLock();
     sessionActive = false;
@@ -1739,7 +1850,7 @@
     'session_id', 'session_started', 'mrn', 'visit_date', 'recording_id', 'file_name',
     'takes', 'duration_s', 'sample_rate', 'bytes',
     'status', 'save_attempts', 'first_saved_at', 'last_attempt_at', 'last_attempt_result', 'last_error',
-    'recorded_at', 'peak_dbfs', 'rms_dbfs', 'clipped_samples',
+    'recorded_at', 'peak_dbfs', 'rms_dbfs', 'clipped_samples', 'capture_rate_hz', 'capture_check',
     'app_version', 'device_id', 'device_label', 'device_type', 'browser', 'user_agent', 'mic_label',
     'echo_cancellation', 'noise_suppression', 'auto_gain_control', 'channel_count',
     'mic_settings_reported', 'constraints_requested', 'constraints_supported',
@@ -1896,6 +2007,8 @@
       peak_dbfs: lv.peakDbfs ?? '',
       rms_dbfs: lv.rmsDbfs ?? '',
       clipped_samples: lv.clipped ?? '',
+      capture_rate_hz: r.captureRate ? Math.round(r.captureRate) : '',
+      capture_check: r.isLog ? '' : r.id === 'complete' ? (r.resampled ? 'built from takes at different rates (resampled)' : '') : (r.captureCheck || ''),
       app_version: APP_VERSION,
       device_id: getDeviceId(),
       device_label: getDeviceLabel(),
