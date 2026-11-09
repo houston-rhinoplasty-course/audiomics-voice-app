@@ -11,7 +11,7 @@
   Audiomics Voice Recording — iPad web app (Houston Methodist ENT, R01)
   =====================================================================
 
-  Version: 4.6 (October 2026)
+  Version: 4.7 (November 2026)
   See README.md for setup, iPad settings, file naming, and references.
 
   WHAT THIS PAGE DOES
@@ -22,10 +22,9 @@
        the app's flow), aaa, eee, mmm, nnn (5 s each), and six CAPE-V
        sentences (each its own recording, advanced with "Next
        sentence").
-     Every task opens with the blue instruction screen and a 5 s
-     countdown. "I'm Ready" goes straight into task 1, and Next goes
-     straight into tasks 2-5; only the sentences use a Start tap. Each take can be played back, then redone or
-     accepted with Next.
+     Each task has its own screen with its instructions; recording
+     starts when the patient taps Start (no countdown). Each take can
+     be played back, then redone or accepted with Next.
   3. Each task is saved as its own WAV file through the iPad share
      sheet ("Save to Files", Box, etc.), plus a "complete" WAV that
      joins all recordings in order with 0.5 s of silence between them.
@@ -332,52 +331,6 @@
   .sentence.current .s-num { background: var(--accent); color: #fff; }
   .s-flag { color: var(--accent); font-size: 14px; font-weight: 600; white-space: nowrap; }
 
-  /* Countdown (3-2-1 before each task): full-screen Methodist Blue
-     overlay that also shows the upcoming task, so the patient knows
-     what to do when recording starts. Solid colour: the brand guide
-     does not allow tints of Methodist Blue. */
-  .countdown-overlay {
-    display: none; position: fixed; inset: 0; z-index: 100;
-    background: var(--methodist-blue); color: #fff;
-    flex-direction: column; align-items: center; justify-content: center;
-    gap: 14px; padding: 32px; text-align: center;
-  }
-  .countdown-overlay.active { display: flex; animation: fadeIn 0.2s ease; }
-  .cd-badge {
-    font-size: 12px; font-weight: 600; letter-spacing: 2px; text-transform: uppercase;
-    border: 1px solid var(--accent-blue); color: #fff; padding: 6px 16px; border-radius: 20px;
-  }
-  .cd-title { font-size: 44px; font-weight: 700; line-height: 1.2; letter-spacing: -0.3px; }
-  .cd-sub { font-size: 22px; line-height: 1.4; max-width: 520px; }
-  .cd-sentence {
-    font-size: 28px; font-weight: 600; line-height: 1.4; max-width: 600px;
-    background: #fff; color: var(--text); border-radius: 12px; padding: 18px 28px;
-  }
-  /* Sentence version: "You will start with:" above the card, and
-     "Then tap [Next sentence]" below it. The chip copies the real
-     button (Mulberry, white text) so patients recognise it; the thin
-     white outline keeps it visible against Methodist Blue. */
-  .cd-lead { font-size: 20px; font-weight: 500; margin-top: 10px; margin-bottom: -4px; }
-  .cd-then {
-    display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap;
-    font-size: 20px; font-weight: 500; margin-top: 4px;
-  }
-  .cd-chip {
-    display: inline-block; background: var(--accent); color: #fff;
-    font-size: 17px; font-weight: 600; padding: 8px 18px; border-radius: 12px;
-    border: 2px solid #fff;
-  }
-  .cd-label { margin-top: 36px; font-size: 16px; font-weight: 600; letter-spacing: 1px; text-transform: uppercase; }
-  .cd-num {
-    font-size: 96px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums;
-  }
-  .cd-num.pop { animation: countPop 0.6s ease; }
-  @keyframes countPop {
-    0% { transform: scale(0.5); opacity: 0; }
-    60% { transform: scale(1.1); }
-    100% { transform: scale(1); opacity: 1; }
-  }
-
   /* Save screen ---------------------------------------------------- */
   .file-list { list-style: none; }
   .file-list li {
@@ -658,19 +611,6 @@
 
 </div>
 
-<!-- Countdown overlay: filled in by runCountdown() with the upcoming task -->
-<div class="countdown-overlay" id="countdown-overlay" role="status" aria-live="assertive">
-  <div class="cd-badge" id="cd-badge"></div>
-  <div class="cd-title" id="cd-title"></div>
-  <div class="cd-sub" id="cd-sub"></div>
-  <!-- Sentence task only -->
-  <div class="cd-lead hidden" id="cd-lead"></div>
-  <div class="cd-sentence hidden" id="cd-sentence"></div>
-  <div class="cd-then hidden" id="cd-then"><span>Then tap</span><span class="cd-chip" id="cd-chip">Next sentence</span></div>
-  <div class="cd-label">Recording starts in</div>
-  <div class="cd-num" id="countdown-num">3</div>
-</div>
-
 <script>
   'use strict';
 
@@ -678,10 +618,7 @@
      CONFIGURATION
      ================================================================= */
 
-  const APP_VERSION = '4.6';
-
-  // Seconds of lead-in countdown before each task.
-  const COUNTDOWN_SECONDS = 5;   // time to read the instructions before recording starts
+  const APP_VERSION = '4.7';
 
   // Seconds of digital silence placed between tasks in the combined
   // "complete" file, so the task boundaries are easy to see and hear.
@@ -691,13 +628,9 @@
   // Task definitions, in order.
   //   id        file-name suffix for the recording
   //   dur       recording length in seconds (timed tasks)
-  //   countdownSec  seconds on the countdown screen for this task
-  //             (default COUNTDOWN_SECONDS)
-  //   countdown false = start recording as soon as Start is tapped
-  //             (supported but not currently used by any task)
   //   items     sentences task only: one recording per item, saved as
-  //             sentence1 ... sentence6. One countdown before the
-  //             first sentence; "Next sentence" moves straight on.
+  //             sentence1 ... sentence6. Start begins sentence 1;
+  //             "Next sentence" moves straight on to the next one.
   const TASKS = [
     // Room noise first: gives a noise-floor reference and lets the
     // patient get used to the Start -> countdown -> record flow before
@@ -708,7 +641,6 @@
     { id: 'mmm',       badge: 'Task 4 of 6', title: 'Say "Mmmm"',  sub: 'Hold a steady tone for 5 seconds.',                         dur: 5 },
     { id: 'nnn',       badge: 'Task 5 of 6', title: 'Say "Nnnn"',  sub: 'Hold a steady tone for 5 seconds.',                         dur: 5 },
     { id: 'sentence',  badge: 'Task 6 of 6', title: 'Read aloud',  sub: 'Tap Start when you are ready.', dur: null,
-      countdownSec: 5,               // time to read the first sentence and the Next sentence instruction
       items: [                       // CAPE-V sentences (Kempster et al., 2009)
         'The blue spot is on the key again.',
         'How hard did he hit him?',
@@ -766,7 +698,6 @@
   let sampleCount = 0;
   let sampleLimit = 0;         // 0 = no limit (reading task)
   let rafId = null;
-  let countdownIv = null;
 
   // Finished recordings, keyed by recording id (see RECORDING_IDS):
   //   { id, name, blob, samples, saved, durationSec, sampleRate }
@@ -899,14 +830,11 @@
     showScreen('screen-welcome');
   }
 
-  // "I'm Ready": go straight into task 1 (room noise) with its blue
-  // instruction screen; no separate Start tap. This tap also opens the
-  // microphone, so Safari's permission prompt appears here.
+  // "I'm Ready": show task 1 (room noise) with its Start button.
   function beginTasks() {
     taskIndex = 0;
     renderTask();
     showScreen('screen-task');
-    startTask();
   }
 
   // Ordered list of finished recordings (skips any not recorded yet).
@@ -1030,11 +958,9 @@
     $('timer-text').textContent = Math.max(0, Math.ceil(totalSec - elapsedSec));
   }
 
-  // Start a task: blue instruction screen with the countdown, then
-  // record. Called from "I'm Ready" (room noise), from Next or Redo
-  // (room noise, ahh, eee, mmm, nnn), and from the Start tap on the
-  // sentence task. Opens the mic first, inside the
-  // tap, which iOS needs for AudioContext.
+  // Start tap: recording begins straight away (no countdown). Opens the
+  // mic first, inside the tap, which iOS needs for AudioContext; the
+  // first Start of a session brings up Safari's microphone prompt.
   async function startTask() {
     hideError('task-error');
     stopPlayback();
@@ -1055,13 +981,10 @@
       setStatus('recording');
       showButtons('none');
     };
-    if (t.items) renderSentences('recording'); // show which sentence comes first
-    if (t.countdown === false) begin();
-    else runCountdown(begin);
+    begin();
   }
 
-  // Start recording the highlighted sentence (no countdown; the one
-  // countdown happens before the first sentence or a single redo).
+  // Start recording the highlighted sentence.
   function beginSentence() {
     const t = TASKS[taskIndex];
     currentRecId = `${t.id}${sentenceIndex + 1}`;
@@ -1075,56 +998,6 @@
     startRecording(null);
     setStatus('recording');
     showButtons('stop');
-  }
-
-  // 3-2-1 countdown on a full-screen blue overlay that repeats the
-  // upcoming task: title and instruction, plus the sentence to read
-  // for the sentence task (sentence 1, or the one being redone).
-  function runCountdown(callback) {
-    const t = TASKS[taskIndex];
-    $('cd-badge').textContent = t.badge;
-    const sentenceParts = ['cd-lead', 'cd-sentence', 'cd-then'];
-    if (t.items) {
-      // Layout: title -> "You will start with:" -> sentence card ->
-      // "Then tap [Next sentence]" -> countdown.
-      const single = sentenceMode === 'single';
-      $('cd-title').textContent = single ? `Redo sentence ${sentenceIndex + 1}` : 'Read one sentence at a time';
-      $('cd-sub').classList.add('hidden');
-      $('cd-sub').textContent = '';
-      $('cd-lead').textContent = single ? 'Read:' : 'Start with:';
-      $('cd-sentence').textContent = `"${t.items[sentenceIndex]}"`;
-      $('cd-chip').textContent = single ? 'Done reading' : 'Next sentence';
-      sentenceParts.forEach((id) => $(id).classList.remove('hidden'));
-    } else {
-      $('cd-title').textContent = t.title;
-      $('cd-sub').textContent = t.sub;
-      $('cd-sub').classList.remove('hidden');
-      sentenceParts.forEach((id) => $(id).classList.add('hidden'));
-    }
-
-    const overlay = $('countdown-overlay');
-    const numEl = $('countdown-num');
-    let count = t.countdownSec || COUNTDOWN_SECONDS;
-    const pop = () => {
-      numEl.textContent = count;
-      numEl.classList.remove('pop');
-      void numEl.offsetWidth; // restart the pop animation
-      numEl.classList.add('pop');
-    };
-    overlay.classList.add('active');
-    pop();
-
-    countdownIv = setInterval(() => {
-      count--;
-      if (count <= 0) {
-        clearInterval(countdownIv);
-        countdownIv = null;
-        overlay.classList.remove('active');
-        callback();
-      } else {
-        pop();
-      }
-    }, 1000);
   }
 
   // "Next sentence" / "Done reading". Stopping and starting happen in
@@ -1174,7 +1047,8 @@
     showButtons('review');
   }
 
-  // Redo one sentence: countdown, record only that sentence, back to review.
+  // Redo one sentence: the Redo tap starts recording that sentence
+  // straight away; Done reading returns to the review list.
   async function redoSentence(i) {
     stopPlayback();
     sentenceMode = 'single';
@@ -1188,7 +1062,7 @@
       showSentenceReview();
       return;
     }
-    runCountdown(beginSentence);
+    beginSentence();
   }
 
   // Called by stopRecording(). Stores the take under currentRecId,
@@ -1241,18 +1115,15 @@
     const t = TASKS[taskIndex];
     if (t.items) t.items.forEach((_, i) => { delete results[`${t.id}${i + 1}`]; flaggedTakes.delete(`${t.id}${i + 1}`); });
     else { delete results[t.id]; flaggedTakes.delete(t.id); }
-    renderTask();
-    if (!t.items) startTask(); // timed task: instruction screen, then record again
+    renderTask(); // back to the task screen; the patient taps Start to record again
   }
 
-  // Next: timed tasks (ahh, eee, mmm, nnn) go straight to their blue
-  // instruction screen and record; the sentence task waits for Start.
+  // Next: show the next task's screen; the patient taps Start to record.
   function nextTask() {
     stopPlayback();
     if (taskIndex < TASKS.length - 1) {
       taskIndex++;
       renderTask();
-      if (!TASKS[taskIndex].items) startTask();
     } else {
       finishSession();
     }
@@ -1260,8 +1131,6 @@
 
   function cancelSession() {
     if (!confirm('Cancel this session? Any recordings not yet saved will be lost.')) return;
-    if (countdownIv) { clearInterval(countdownIv); countdownIv = null; }
-    $('countdown-overlay').classList.remove('active');
     stopRecording(true);
     stopPlayback();
     releaseMic();
